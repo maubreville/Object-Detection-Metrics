@@ -11,7 +11,7 @@
 import os
 import sys
 from collections import Counter
-
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -57,24 +57,46 @@ class Evaluator:
         # Get all classes
         classes = []
         # Loop through all bounding boxes and separate them into GTs and detections
-        for bb in boundingboxes.getBoundingBoxes():
-            # [imageName, class, confidence, (bb coordinates XYX2Y2)]
-            if bb.getBBType() == BBType.GroundTruth:
-                groundTruths.append([
-                    bb.getImageName(),
-                    bb.getClassId(), 1,
-                    bb.getAbsoluteBoundingBox(BBFormat.XYX2Y2)
-                ])
-            else:
-                detections.append([
-                    bb.getImageName(),
-                    bb.getClassId(),
-                    bb.getConfidence(),
-                    bb.getAbsoluteBoundingBox(BBFormat.XYX2Y2)
-                ])
-            # get class
-            if bb.getClassId() not in classes:
-                classes.append(bb.getClassId())
+        if ('getBoundingBoxes' in dir(boundingboxes)):
+            for bb in boundingboxes.getBoundingBoxes():
+                # [imageName, class, confidence, (bb coordinates XYX2Y2)]
+                if bb.getBBType() == BBType.GroundTruth:
+                    groundTruths.append([
+                        bb.getImageName(),
+                        bb.getClassId(), 1,
+                        bb.getAbsoluteBoundingBox(BBFormat.XYX2Y2)
+                    ])
+                else:
+                    detections.append([
+                        bb.getImageName(),
+                        bb.getClassId(),
+                        bb.getConfidence(),
+                        bb.getAbsoluteBoundingBox(BBFormat.XYX2Y2)
+                    ])
+                # get class
+                if bb.getClassId() not in classes:
+                    classes.append(bb.getClassId())
+        else:
+            for bb in boundingboxes.getBoundingObjects():
+                # [imageName, class, confidence, (bb coordinates XYX2Y2)]
+                if bb.getBBType() == BBType.GroundTruth:
+                    groundTruths.append([
+                        bb.getImageName(),
+                        bb.getClassId(), 1,
+                        bb.getAbsoluteBoundingObject(BBFormat.XYX2Y2)
+                    ])
+                else:
+                    detections.append([
+                        bb.getImageName(),
+                        bb.getClassId(),
+                        bb.getConfidence(),
+                        bb.getAbsoluteBoundingObject(BBFormat.XYX2Y2)
+                    ])
+                # get class
+                if bb.getClassId() not in classes:
+                    classes.append(bb.getClassId())
+
+        
         classes = sorted(classes)
         # Precision x Recall is obtained individually by each class
         # Loop through by classes
@@ -90,13 +112,14 @@ class Evaluator:
             dects = sorted(dects, key=lambda conf: conf[2], reverse=True)
             TP = np.zeros(len(dects))
             FP = np.zeros(len(dects))
+            FN = np.zeros(len(gts))
             # create dictionary with amount of gts for each image
             det = Counter([cc[0] for cc in gts])
             for key, val in det.items():
                 det[key] = np.zeros(val)
             # print("Evaluating class: %s (%d detections)" % (str(c), len(dects)))
             # Loop through detections
-            for d in range(len(dects)):
+            for d in tqdm(range(len(dects)),desc='Detections'):
                 # print('dect %s => %s' % (dects[d][0], dects[d][3],))
                 # Find ground truth image
                 gt = [gt for gt in gts if gt[0] == dects[d][0]]
@@ -120,6 +143,26 @@ class Evaluator:
                 else:
                     FP[d] = 1  # count as false positive
                     # print("FP")
+            
+            for gt in tqdm(range(len(gts)), desc='GT'):
+
+                d = [d for d in dects if d[0] == gts[gt][0]]
+
+                iouMax = sys.float_info.min
+                # find maximum IOU
+                for j in range(len(d)):
+                    # print('Ground truth gt => %s' % (gt[j][3],))
+                    iou = Evaluator.iou(gts[gt][3], d[j][3])
+                    if iou > iouMax:
+                        iouMax = iou
+                        jmax = j
+                # Assign detection as true positive/don't care/false positive
+                if iouMax < IOUThreshold:
+                    FN[gt] = 1  # count as false negative
+                    # print("FP")
+
+
+                
             # compute precision, recall and average precision
             acc_FP = np.cumsum(FP)
             acc_TP = np.cumsum(TP)
@@ -139,8 +182,10 @@ class Evaluator:
                 'interpolated precision': mpre,
                 'interpolated recall': mrec,
                 'total positives': npos,
+                'F1': (2*np.sum(TP)/(2*np.sum(TP)+np.sum(FN)+np.sum(FP))),
                 'total TP': np.sum(TP),
-                'total FP': np.sum(FP)
+                'total FP': np.sum(FP),
+                'total FN': np.sum(FN),
             }
             ret.append(r)
         return ret
@@ -379,17 +424,44 @@ class Evaluator:
         return sorted(ret, key=lambda i: i[0], reverse=True)  # sort by iou (from highest to lowest)
 
     @staticmethod
-    def iou(boxA, boxB):
-        # if boxes dont intersect
-        if Evaluator._boxesIntersect(boxA, boxB) is False:
-            return 0
-        interArea = Evaluator._getIntersectionArea(boxA, boxB)
-        union = Evaluator._getUnionAreas(boxA, boxB, interArea=interArea)
-        # intersection over union
-        iou = interArea / union
+    def iou(objA, objB):
+        if (len(objA)==4):
+            # if boxes dont intersect
+            if Evaluator._boxesIntersect(objA, objB) is False:
+                return 0
+            interArea = Evaluator._getIntersectionArea(objA, objB)
+            union = Evaluator._getUnionAreas(objA, objB, interArea=interArea)
+            # intersection over union
+            iou = interArea / union
+        else: # circular objects
+            if Evaluator._circlesIntersect(objA, objB) is False:
+                return 0
+            distance = np.sqrt(np.square(objA[0]-objB[0])+np.square(objA[1]-objB[1]))
+
+            radius1 = objA[2]
+            radius2 = objB[2]
+            acosterm1 = np.arccos((((distance**2) + (radius1**2) - (radius2**2)) / (2 * distance * radius1 + 1e-8)).clip(-1,1))
+            acosterm2 = np.arccos((((distance**2) - (radius1**2) + (radius2**2)) / (2 * distance * radius2 + 1e-8)).clip(-1,1))
+            secondterm = np.sqrt(((radius1+radius2-distance)*(distance+radius1-radius2)*(distance+radius1+radius2)*(distance-radius1+radius2)).clip(min=0))
+
+            intersec = (radius1**2 * acosterm1) + (radius2**2 * acosterm2) - (0.5 * secondterm)
+
+            union = np.pi * ((radius1**2) + (radius2**2)) - intersec
+            iou = intersec / (union+1e-8)
+            
         assert iou >= 0
         return iou
 
+    @staticmethod
+    def _circlesIntersect(circA, circB):
+         distance = np.sqrt(np.square(circA[0]-circB[0])+np.square(circA[1]-circB[1]))
+         if distance>(circA[2]+circB[2]):
+              return False
+         else:
+              return True
+
+    
+    
     # boxA = (Ax1,Ay1,Ax2,Ay2)
     # boxB = (Bx1,By1,Bx2,By2)
     @staticmethod

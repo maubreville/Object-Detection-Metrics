@@ -17,6 +17,9 @@ class BoundingBoxes:
 
     def removeAllBoundingBoxes(self):
         self._boundingBoxes = []
+    
+    def removeAllBoundingObjects(self):
+        self.removeAllBoundingBoxes()
 
     def getBoundingBoxes(self):
         return self._boundingBoxes
